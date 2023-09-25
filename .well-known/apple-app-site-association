@@ -33,6 +33,10 @@
                         "comment": "I Owe You reports"
                     },
                     {
+                        "/": "/request/*",
+                        "comment": "Money request"
+                    },
+                    {
                         "/": "/enable-payments/*",
                         "comment": "Payments setup"
                     },
@@ -59,6 +63,14 @@
                     {
                         "/": "/new/*",
                         "comment": "New Chat"
+                    },
+                    {
+                        "/": "/workspace/*",
+                        "comment": "Workspace Details"
+                    },
+                    {
+                        "/": "/teachersunite/*",
+                        "comment": "Teachers Unite!"
                     }
                 ]
             }

@@ -1,5 +1,5 @@
 import React, {useEffect, useState, useCallback, useRef} from 'react';
-import {View} from 'react-native';
+import {ScrollView, View} from 'react-native';
 import PropTypes from 'prop-types';
 import lodashGet from 'lodash/get';
 import _ from 'underscore';
@@ -12,6 +12,11 @@ import * as DeviceCapabilities from '../../../libs/DeviceCapabilities';
 import TextInputWithCurrencySymbol from '../../../components/TextInputWithCurrencySymbol';
 import useLocalize from '../../../hooks/useLocalize';
 import CONST from '../../../CONST';
+import FormHelpMessage from '../../../components/FormHelpMessage';
+import refPropTypes from '../../../components/refPropTypes';
+import getOperatingSystem from '../../../libs/getOperatingSystem';
+import * as Browser from '../../../libs/Browser';
+import useWindowDimensions from '../../../hooks/useWindowDimensions';
 
 const propTypes = {
     /** IOU amount saved in Onyx */
@@ -24,7 +29,7 @@ const propTypes = {
     isEditing: PropTypes.bool,
 
     /** Refs forwarded to the TextInputWithCurrencySymbol */
-    forwardedRef: PropTypes.oneOfType([PropTypes.func, PropTypes.shape({current: PropTypes.instanceOf(React.Component)})]),
+    forwardedRef: refPropTypes,
 
     /** Fired when back button pressed, navigates to currency selection page */
     onCurrencyButtonPress: PropTypes.func.isRequired,
@@ -53,24 +58,32 @@ const getNewSelection = (oldSelection, prevLength, newLength) => {
     return {start: cursorPosition, end: cursorPosition};
 };
 
+const isAmountValid = (amount) => !amount.length || parseFloat(amount) < 0.01;
+
 const AMOUNT_VIEW_ID = 'amountView';
 const NUM_PAD_CONTAINER_VIEW_ID = 'numPadContainerView';
 const NUM_PAD_VIEW_ID = 'numPadView';
 
 function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCurrencyButtonPress, onSubmitButtonPress}) {
-    const {translate, toLocaleDigit, fromLocaleDigit, numberFormat} = useLocalize();
+    const {isExtraSmallScreenHeight} = useWindowDimensions();
+    const {translate, toLocaleDigit, numberFormat} = useLocalize();
 
     const textInput = useRef(null);
 
-    const selectedAmountAsString = amount ? CurrencyUtils.convertToWholeUnit(currency, amount).toString() : '';
+    const selectedAmountAsString = amount ? CurrencyUtils.convertToFrontendAmount(amount).toString() : '';
 
     const [currentAmount, setCurrentAmount] = useState(selectedAmountAsString);
+    const [isInvalidAmount, setIsInvalidAmount] = useState(isAmountValid(selectedAmountAsString));
+    const [firstPress, setFirstPress] = useState(false);
+    const [formError, setFormError] = useState('');
     const [shouldUpdateSelection, setShouldUpdateSelection] = useState(true);
 
     const [selection, setSelection] = useState({
         start: selectedAmountAsString.length,
         end: selectedAmountAsString.length,
     });
+
+    const forwardDeletePressedRef = useRef(false);
 
     /**
      * Event occurs when a user presses a mouse button over an DOM element.
@@ -92,32 +105,22 @@ function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCu
         }
     };
 
-    /**
-     * Convert amount to whole unit and update selection
-     *
-     * @param {String} currencyCode
-     * @param {Number} amountInCurrencyUnits
-     */
-    const saveAmountToState = (currencyCode, amountInCurrencyUnits) => {
-        if (!currencyCode || !amountInCurrencyUnits) {
+    useEffect(() => {
+        if (!currency || !amount) {
             return;
         }
-        const amountAsStringForState = CurrencyUtils.convertToWholeUnit(currencyCode, amountInCurrencyUnits).toString();
+        const amountAsStringForState = CurrencyUtils.convertToFrontendAmount(amount).toString();
         setCurrentAmount(amountAsStringForState);
         setSelection({
             start: amountAsStringForState.length,
             end: amountAsStringForState.length,
         });
-    };
-
-    useEffect(() => {
-        saveAmountToState(currency, amount);
         // we want to update the state only when the amount is changed
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [amount]);
 
     /**
-     * Sets the state according to amount that is passed
+     * Sets the selection and the amount accordingly to the value passed to the input
      * @param {String} newAmount - Changed amount from user input
      */
     const setNewAmount = (newAmount) => {
@@ -127,13 +130,17 @@ function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCu
         // Use a shallow copy of selection to trigger setSelection
         // More info: https://github.com/Expensify/App/issues/16385
         if (!MoneyRequestUtils.validateAmount(newAmountWithoutSpaces)) {
-            setCurrentAmount((prevAmount) => prevAmount);
             setSelection((prevSelection) => ({...prevSelection}));
             return;
         }
+        const checkInvalidAmount = isAmountValid(newAmountWithoutSpaces);
+        setIsInvalidAmount(checkInvalidAmount);
+        setFormError(checkInvalidAmount ? 'iou.error.invalidAmount' : '');
         setCurrentAmount((prevAmount) => {
-            setSelection((prevSelection) => getNewSelection(prevSelection, prevAmount.length, newAmountWithoutSpaces.length));
-            return MoneyRequestUtils.stripCommaFromAmount(newAmountWithoutSpaces);
+            const strippedAmount = MoneyRequestUtils.stripCommaFromAmount(newAmountWithoutSpaces);
+            const isForwardDelete = prevAmount.length > strippedAmount.length && forwardDeletePressedRef.current;
+            setSelection((prevSelection) => getNewSelection(prevSelection, isForwardDelete ? strippedAmount.length : prevAmount.length, strippedAmount.length));
+            return strippedAmount;
         });
     };
 
@@ -176,29 +183,38 @@ function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCu
     }, []);
 
     /**
-     * Update amount on amount change
-     * Validate new amount with decimal number regex up to 6 digits and 2 decimal digit
-     *
-     * @param {String} text - Changed text from user input
-     */
-    const updateAmount = (text) => {
-        const newAmount = MoneyRequestUtils.addLeadingZero(MoneyRequestUtils.replaceAllDigits(text, fromLocaleDigit));
-        setNewAmount(newAmount);
-    };
-
-    /**
      * Submit amount and navigate to a proper page
-     *
      */
     const submitAndNavigateToNextPage = useCallback(() => {
+        if (isInvalidAmount) {
+            setFirstPress(true);
+            setFormError('iou.error.invalidAmount');
+            return;
+        }
         onSubmitButtonPress(currentAmount);
-    }, [onSubmitButtonPress, currentAmount]);
+    }, [onSubmitButtonPress, currentAmount, isInvalidAmount]);
+
+    /**
+     * Input handler to check for a forward-delete key (or keyboard shortcut) press.
+     */
+    const textInputKeyPress = ({nativeEvent}) => {
+        const key = nativeEvent.key.toLowerCase();
+        if (Browser.isMobileSafari() && key === CONST.PLATFORM_SPECIFIC_KEYS.CTRL.DEFAULT) {
+            // Optimistically anticipate forward-delete on iOS Safari (in cases where the Mac Accessiblity keyboard is being
+            // used for input). If the Control-D shortcut doesn't get sent, the ref will still be reset on the next key press.
+            forwardDeletePressedRef.current = true;
+            return;
+        }
+        // Control-D on Mac is a keyboard shortcut for forward-delete. See https://support.apple.com/en-us/HT201236 for Mac keyboard shortcuts.
+        // Also check for the keyboard shortcut on iOS in cases where a hardware keyboard may be connected to the device.
+        forwardDeletePressedRef.current = key === 'delete' || (_.contains([CONST.OS.MAC_OS, CONST.OS.IOS], getOperatingSystem()) && nativeEvent.ctrlKey && key === 'd');
+    };
 
     const formattedAmount = MoneyRequestUtils.replaceAllDigits(currentAmount, toLocaleDigit);
     const buttonText = isEditing ? translate('common.save') : translate('common.next');
 
     return (
-        <>
+        <ScrollView contentContainerStyle={styles.flexGrow1}>
             <View
                 nativeID={AMOUNT_VIEW_ID}
                 onMouseDown={(event) => onMouseDown(event, [AMOUNT_VIEW_ID])}
@@ -206,7 +222,7 @@ function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCu
             >
                 <TextInputWithCurrencySymbol
                     formattedAmount={formattedAmount}
-                    onChangeAmount={updateAmount}
+                    onChangeAmount={setNewAmount}
                     onCurrencyButtonPress={onCurrencyButtonPress}
                     placeholder={numberFormat(0)}
                     ref={(ref) => {
@@ -226,11 +242,19 @@ function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCu
                         }
                         setSelection(e.nativeEvent.selection);
                     }}
+                    onKeyPress={textInputKeyPress}
                 />
             </View>
+            {!_.isEmpty(formError) && firstPress && (
+                <FormHelpMessage
+                    style={[styles.ph5]}
+                    isError
+                    message={translate(formError)}
+                />
+            )}
             <View
                 onMouseDown={(event) => onMouseDown(event, [NUM_PAD_CONTAINER_VIEW_ID, NUM_PAD_VIEW_ID])}
-                style={[styles.w100, styles.justifyContentEnd, styles.pageWrapper]}
+                style={[styles.w100, styles.justifyContentEnd, styles.pageWrapper, styles.pt0]}
                 nativeID={NUM_PAD_CONTAINER_VIEW_ID}
             >
                 {DeviceCapabilities.canUseTouchScreen() ? (
@@ -242,14 +266,14 @@ function MoneyRequestAmountForm({amount, currency, isEditing, forwardedRef, onCu
                 ) : null}
                 <Button
                     success
+                    medium={isExtraSmallScreenHeight}
                     style={[styles.w100, styles.mt5]}
                     onPress={submitAndNavigateToNextPage}
                     pressOnEnter
-                    isDisabled={!currentAmount.length || parseFloat(currentAmount) < 0.01}
                     text={buttonText}
                 />
             </View>
-        </>
+        </ScrollView>
     );
 }
 
